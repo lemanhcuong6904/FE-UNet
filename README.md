@@ -157,11 +157,11 @@ Kết quả cho mỗi split được lưu tại `OUTPUT_DIR/<split>/`:
 
 `IMAGE_SIZE`, kiến trúc SAM2 và đường dẫn checkpoint khi đánh giá phải khớp với cấu hình dùng để huấn luyện. Có thể điều chỉnh `THRESHOLD`, `MAX_PANELS` và `OVERLAY_ALPHA` trực tiếp trong script.
 
-![alt text](runs/polyp_feunet_320/inference_test/kvasir_test/panels/00001_Kvasir-SEG_0002.png)
-![alt text](runs/polyp_feunet_320/inference_test/kvasir_test/panels/00026_Kvasir-SEG_0027.png)
-![alt text](runs/polyp_feunet_320/inference_test/CVC-ColonDB_test/panels/00003_CVC-ColonDB_0004.png)  
-![alt text](runs/polyp_feunet_320/inference_test/CVC-300_test/panels/00006_CVC-300_0007.png)
-![alt text](runs/polyp_feunet_320/inference_test/ETIS_test/panels/00004_ETIS_0005.png)
+![alt text](images/00001_Kvasir-SEG_0002.png)
+![alt text](images/00026_Kvasir-SEG_0027.png)
+![alt text](images/00003_CVC-ColonDB_0004.png)  
+![alt text](images/00006_CVC-300_0007.png)
+![alt text](images/00004_ETIS_0005.png)
 ## Ghi chú
 
 - Mô hình trả về ba đầu ra và dùng deep supervision trong quá trình huấn luyện.
@@ -171,4 +171,3 @@ Kết quả cho mỗi split được lưu tại `OUTPUT_DIR/<split>/`:
 ## Nguồn tham khảo
 
 - [Segment Anything 2 (SAM2)](https://github.com/facebookresearch/sam2)
-
