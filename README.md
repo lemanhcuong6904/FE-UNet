@@ -1,6 +1,6 @@
 # FE-UNet for Polyp Segmentation
 
-Triển khai PyTorch của **FE-UNet** dùng **SAM2 Hiera-L** làm bộ trích xuất đặc trưng để phân đoạn polyp trong ảnh nội soi. Dự án hỗ trợ chuẩn bị dữ liệu, huấn luyện, đánh giá trên nhiều bộ kiểm thử và xuất ảnh trực quan dạng `Image | Ground truth | Prediction`.
+Triển khai PyTorch của **FE-UNet** dùng **SAM2 Hiera-L** làm bộ trích xuất đặc trưng để phân đoạn polyp trong ảnh nội soi.
 
 ## Kết quả
 
@@ -27,14 +27,13 @@ FE-UNet/
 └── README.md
 ```
 
-Dữ liệu, checkpoint, thư mục `runs/` và mã nguồn SAM2 cục bộ không được đưa vào Git.
+Dữ liệu, checkpoint, thư mục `runs/` và mã nguồn SAM2 không nằm trong repo.
 
 ## Yêu cầu
 
 - Python 3.10 trở lên
 - PyTorch 2.5.1 trở lên
-- GPU NVIDIA có CUDA được khuyến nghị cho Hiera-L
-- Git
+
 
 Tạo môi trường và cài các thư viện Python:
 
@@ -158,12 +157,16 @@ Kết quả cho mỗi split được lưu tại `OUTPUT_DIR/<split>/`:
 
 `IMAGE_SIZE`, kiến trúc SAM2 và đường dẫn checkpoint khi đánh giá phải khớp với cấu hình dùng để huấn luyện. Có thể điều chỉnh `THRESHOLD`, `MAX_PANELS` và `OVERLAY_ALPHA` trực tiếp trong script.
 
+![alt text](runs/polyp_feunet_320/inference_test/kvasir_test/panels/00001_Kvasir-SEG_0002.png)
+![alt text](runs/polyp_feunet_320/inference_test/kvasir_test/panels/00026_Kvasir-SEG_0027.png)
+![alt text](runs/polyp_feunet_320/inference_test/CVC-ColonDB_test/panels/00003_CVC-ColonDB_0004.png)  
+![alt text](runs/polyp_feunet_320/inference_test/CVC-300_test/panels/00006_CVC-300_0007.png)
+![alt text](runs/polyp_feunet_320/inference_test/ETIS_test/panels/00004_ETIS_0005.png)
 ## Ghi chú
 
 - Mô hình trả về ba đầu ra và dùng deep supervision trong quá trình huấn luyện.
 - Augmentation cho tập train gồm flip, affine và thay đổi độ sáng/tương phản.
 - Nếu GPU không hỗ trợ BF16, mã nguồn tự chuyển AMP sang FP16.
-- Chế độ backbone nhỏ trong `fe_unet_sam2_full.py` chỉ phục vụ debug, không thay thế kết quả từ SAM2 Hiera-L.
 
 ## Nguồn tham khảo
 
