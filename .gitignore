@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local datasets and archives
+Kvasir-SEG/
+CvC-ClinicDB/
+CVC-ColonDB/
+CVC-300/
+ETIS/
+polyp_data/
+*.zip
+*.tar
+*.tar.gz
+*.7z
+
+# Training and inference artifacts
+runs/
+outputs/
+logs/
+wandb/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+
+# SAM2 is installed as an external dependency.
+sam2/
+
