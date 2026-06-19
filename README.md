@@ -15,6 +15,12 @@ Kết quả của checkpoint huấn luyện ở kích thước ảnh `320 × 320
 
 Dice và IoU được tính riêng trên từng ảnh rồi lấy trung bình toàn bộ tập kiểm thử.
 
+Quy mô mô hình FE-UNet + SAM2.1 Hiera-L:
+
+- Trainable: `10,992,831` — `4.93%`
+- Frozen: `212,149,296` — `95.07%`
+- Tổng: `223,142,127`
+
 ## Cấu trúc mã nguồn
 
 ```text

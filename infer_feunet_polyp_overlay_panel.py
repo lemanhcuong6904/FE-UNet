@@ -9,10 +9,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from fe_unet_sam2_full import (
-    build_feunet_sam2,
-    build_tiny_debug_feunet,
-)
+from fe_unet_sam2_full import build_feunet_sam2
 from polyp_dataset import build_polyp_loader
 
 
@@ -84,16 +81,12 @@ def load_checkpoint(path: str | Path, device: torch.device) -> dict:
 
 
 def build_model(device: torch.device) -> torch.nn.Module:
-    if SAM2_CFG and SAM2_CKPT:
-        return build_feunet_sam2(
-            model_cfg=SAM2_CFG,
-            ckpt_path=SAM2_CKPT,
-            device=device,
-            num_classes=1,
-        )
-
-    print("SAM2 cfg/ckpt not provided. Using tiny debug FE-UNet backbone.")
-    return build_tiny_debug_feunet(num_classes=1).to(device)
+    return build_feunet_sam2(
+        model_cfg=SAM2_CFG,
+        ckpt_path=SAM2_CKPT,
+        device=device,
+        num_classes=1,
+    )
 
 
 def load_model_weights(model: torch.nn.Module, checkpoint_path: str | Path, device: torch.device) -> None:

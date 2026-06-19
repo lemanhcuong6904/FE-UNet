@@ -9,7 +9,6 @@ from fe_unet_sam2_full import (
     build_cosine_scheduler,
     build_feunet_sam2,
     build_optimizer,
-    build_tiny_debug_feunet,
     deep_supervision_loss,
 )
 from polyp_dataset import build_polyp_loader
@@ -60,15 +59,12 @@ def get_amp_dtype(device: torch.device) -> torch.dtype:
 
 
 def build_model(device: torch.device) -> torch.nn.Module:
-    if SAM2_CFG and SAM2_CKPT:
-        return build_feunet_sam2(
-            model_cfg=SAM2_CFG,
-            ckpt_path=SAM2_CKPT,
-            device=device,
-            num_classes=1,
-        )
-    print("SAM2 cfg/ckpt not provided. Using tiny debug FE-UNet backbone.")
-    return build_tiny_debug_feunet(num_classes=1).to(device)
+    return build_feunet_sam2(
+        model_cfg=SAM2_CFG,
+        ckpt_path=SAM2_CKPT,
+        device=device,
+        num_classes=1,
+    )
 
 
 def validate_image_size(image_size: int) -> None:

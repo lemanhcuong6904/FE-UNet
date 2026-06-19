@@ -25,10 +25,11 @@ from torch import Tensor, nn
 import torch.nn.functional as F
 
 
-SMOKE_SAM2_CFG = ""
-SMOKE_SAM2_CKPT = ""
-SMOKE_DEVICE = "cpu"
-SMOKE_SIZE = 64
+SAM2_CFG = "sam2/sam2/configs/sam2.1/sam2.1_hiera_l.yaml"
+SAM2_CKPT = "sam2/checkpoints/sam2.1_hiera_large.pt"
+PROFILE_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+PROFILE_IMAGE_SIZE = 320
+PROFILE_BATCH_SIZE = 1
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 LOCAL_SAM2_REPO = PROJECT_ROOT / "sam2"
@@ -460,43 +461,49 @@ def build_feunet_sam2(model_cfg:str, ckpt_path:str, device:Union[str,torch.devic
 
 
 # -----------------------------
-# Dummy debug backbone, not for real training
+# Model statistics
 # -----------------------------
 
-class DummyHieraLikeBackbone(nn.Module):
-    def __init__(self, channels:Sequence[int]=(144,288,576,1152)):
-        super().__init__()
-        c1,c2,c3,c4 = [int(c) for c in channels]
-        self.s1 = ConvBNReLU(3,c1,7,stride=4,padding=3)
-        self.s2 = ConvBNReLU(c1,c2,3,stride=2,padding=1)
-        self.s3 = ConvBNReLU(c2,c3,3,stride=2,padding=1)
-        self.s4 = ConvBNReLU(c3,c4,3,stride=2,padding=1)
-    def forward(self, x:Tensor) -> List[Tensor]:
-        x1 = self.s1(x); x2 = self.s2(x1); x3 = self.s3(x2); x4 = self.s4(x3)
-        return [x1,x2,x3,x4]
+def count_parameters(model:nn.Module) -> Tuple[int,int,int]:
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    frozen = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+    return trainable, frozen, trainable + frozen
 
-def build_tiny_debug_feunet(num_classes:int=1) -> FEUNet:
-    ch = (8,16,32,64)
-    return FEUNet(DummyHieraLikeBackbone(ch), ch, base_ch=8, num_classes=num_classes,
-                  radius_mode='linear2n')
+def measure_forward_flops(model:nn.Module, inputs:Tensor) -> Tuple[int,List[Tensor]]:
+    """Count supported forward-pass FLOPs; some operators such as FFT may be omitted."""
+    try:
+        from torch.utils.flop_counter import FlopCounterMode
+    except ImportError as e:
+        raise RuntimeError("FLOP counting requires PyTorch 2.1 or newer.") from e
 
-def build_debug_feunet(num_classes:int=1) -> FEUNet:
-    return FEUNet(DummyHieraLikeBackbone(), (144,288,576,1152), base_ch=64,
-                  num_classes=num_classes)
+    was_training = model.training
+    model.eval()
+    with torch.no_grad(), FlopCounterMode(display=False) as counter:
+        outputs = model(inputs)
+    model.train(was_training)
+    return int(counter.get_total_flops()), outputs
+
+def format_count(value:int) -> str:
+    return f'{value:,}'
+
+def format_flops(value:int) -> str:
+    return f'{value / 1e9:.3f} GFLOPs'
 
 
 if __name__ == '__main__':
     torch.manual_seed(0)
-    torch.set_num_threads(1)
-    if SMOKE_SAM2_CFG and SMOKE_SAM2_CKPT:
-        model = build_feunet_sam2(SMOKE_SAM2_CFG, SMOKE_SAM2_CKPT, device=SMOKE_DEVICE)
-    else:
-        model = build_tiny_debug_feunet().to(SMOKE_DEVICE)
+    device = torch.device(PROFILE_DEVICE)
+    model = build_feunet_sam2(SAM2_CFG, SAM2_CKPT, device=device)
     model.eval()
-    x = torch.randn(1,3,SMOKE_SIZE,SMOKE_SIZE,device=SMOKE_DEVICE)
-    mask = torch.randint(0,2,(1,1,SMOKE_SIZE,SMOKE_SIZE),device=SMOKE_DEVICE).float()
-    with torch.no_grad():
-        ys = model(x)
-        loss = deep_supervision_loss(ys, mask)
+    x = torch.randn(PROFILE_BATCH_SIZE, 3, PROFILE_IMAGE_SIZE, PROFILE_IMAGE_SIZE, device=device)
+    trainable, frozen, total = count_parameters(model)
+    flops, ys = measure_forward_flops(model, x)
+
+    print('Model: FE-UNet + SAM2.1 Hiera-L')
+    print(f'Input: {tuple(x.shape)} on {device}')
+    print(f'Trainable parameters: {format_count(trainable)} ({trainable / total:.2%})')
+    print(f'Frozen parameters:    {format_count(frozen)} ({frozen / total:.2%})')
+    print(f'Total parameters:     {format_count(total)}')
+    print(f'Forward FLOPs:        {format_count(flops)} ({format_flops(flops)})')
+    print('Note: PyTorch FLOP counting can omit unsupported operators such as FFT.')
     print('Output shapes:', [tuple(y.shape) for y in ys])
-    print('Loss:', float(loss))
