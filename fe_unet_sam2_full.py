@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple, Union
 
+from pytorch_wavelets import DWTForward, DWTInverse
 import numpy  # noqa: F401  # Initialize NumPy before PyTorch loads it through torch.storage.
 import torch
 from torch import Tensor, nn
@@ -263,33 +264,47 @@ def haar_iwt(bands:Tensor, original_hw:Tuple[int,int]) -> Tensor:
     return x[..., :h, :w]
 
 class DWTConv2d(nn.Module):
-    def __init__(self, channels:int, levels:int=1):
+    def __init__(self, channels: int, levels: int = 1, wavelet: str = "haar"):
         super().__init__()
+        self.channels = channels
         self.levels = levels
-        self.mix = nn.ModuleList([nn.Conv2d(4*channels,4*channels,1,bias=False) for _ in range(levels)])
-        self.bn = nn.ModuleList([nn.BatchNorm2d(4*channels) for _ in range(levels)])
-    def forward(self, x:Tensor) -> Tensor:
-        lows: List[Tensor] = []
-        highs: List[Tensor] = []
-        shapes: List[Tuple[int,int]] = []
-        cur = x
-        for i in range(self.levels):
-            if cur.shape[-2] < 2 or cur.shape[-1] < 2:
-                break
-            bands, hw = haar_dwt(cur)
-            bands = F.gelu(self.bn[i](self.mix[i](bands)))
-            ll, lh, hl, hh = torch.chunk(bands, 4, dim=1)
-            lows.append(ll)
-            highs.append(torch.cat([lh,hl,hh], dim=1))
-            shapes.append(hw)
-            cur = ll
-        if not lows:
-            return x
-        z = torch.zeros_like(lows[-1])
-        for i in reversed(range(len(lows))):
-            z = haar_iwt(torch.cat([lows[i] + z, highs[i]], dim=1), shapes[i])
-        return z
+        self.wavelet = wavelet
 
+        self.dwt = DWTForward(J=levels, wave=wavelet, mode="zero")
+        self.iwt = DWTInverse(wave=wavelet, mode="zero")
+
+        self.mix = nn.ModuleList([
+            nn.Conv2d(4 * channels, 4 * channels, 1, bias=False)
+            for _ in range(levels)
+        ])
+
+        self.bn = nn.ModuleList([
+            nn.BatchNorm2d(4 * channels)
+            for _ in range(levels)
+        ])
+
+    def forward(self, x: Tensor) -> Tensor:
+        yl, yh = self.dwt(x)
+
+        # Chỉ xử lý level 1 trước cho ổn định
+        h = yh[0]  # [B, C, 3, H/2, W/2]
+
+        lh = h[:, :, 0, :, :]
+        hl = h[:, :, 1, :, :]
+        hh = h[:, :, 2, :, :]
+
+        bands = torch.cat([yl, lh, hl, hh], dim=1)
+        bands = F.gelu(self.bn[0](self.mix[0](bands)))
+
+        yl, lh, hl, hh = torch.chunk(bands, 4, dim=1)
+
+        yh_new = [
+            torch.stack([lh, hl, hh], dim=2)
+        ]
+
+        y = self.iwt((yl, yh_new))
+
+        return y[..., :x.shape[-2], :x.shape[-1]]
 
 # -----------------------------
 # WSPM / FE-RFB
@@ -327,38 +342,88 @@ class SpectralPoolingFilter(nn.Module):
         return y.to(dtype=dtype)
 
 class WSPM(nn.Module):
-    def __init__(self, channels:int, n:int, wt_levels:int=1,
-                 lambdas:Sequence[float]=(0.7,0.8), radius_mode:str='pow2'):
+    def __init__(self, channels: int, n: int, wt_levels: int = 1,
+                 lambdas: Sequence[float] = (0.7, 0.8),
+                 radius_mode: str = 'pow2',
+                 wavelet: str = 'haar'):
         super().__init__()
-        self.dwt = DWTConv2d(channels, wt_levels)
-        self.dw1 = ConvBNReLU(channels, channels, (1,n), padding=(0,n//2), groups=channels)
-        self.dw2 = ConvBNReLU(channels, channels, (n,1), padding=(n//2,0), groups=channels)
+
+        self.dwt = DWTConv2d(
+            channels,
+            levels=wt_levels,
+            wavelet=wavelet
+        )
+
+        self.dw1 = ConvBNReLU(
+            channels, channels,
+            (1, n),
+            padding=(0, n // 2),
+            groups=channels
+        )
+
+        self.dw2 = ConvBNReLU(
+            channels, channels,
+            (n, 1),
+            padding=(n // 2, 0),
+            groups=channels
+        )
+
         self.spf = nn.ModuleList([
-            nn.Sequential(SpectralPoolingFilter(n, lam, radius_mode),
-                          nn.Conv2d(channels, channels, 1, bias=False),
-                          nn.BatchNorm2d(channels)) for lam in lambdas
+            nn.Sequential(
+                SpectralPoolingFilter(n, lam, radius_mode),
+                nn.Conv2d(channels, channels, 1, bias=False),
+                nn.BatchNorm2d(channels)
+            )
+            for lam in lambdas
         ])
+
         self.out = ConvBNReLU(channels, channels, 1)
-    def forward(self, x:Tensor) -> Tensor:
+
+    def forward(self, x: Tensor) -> Tensor:
         z = self.dw2(self.dw1(self.dwt(x)))
+
         m = torch.zeros_like(z)
         for branch in self.spf:
             m = m + branch(z)
+
         return self.out(F.relu(z + m, inplace=True))
 
 class FERFB(nn.Module):
-    def __init__(self, in_ch:int, out_ch:int=64, branch_ch:Optional[int]=None,
-                 wt_levels:int=1, radius_mode:str='pow2'):
+    def __init__(self, in_ch: int, out_ch: int = 64, branch_ch: Optional[int] = None,
+                 wt_levels: int = 1, radius_mode: str = 'pow2',
+                 wavelet: str = 'haar'):
         super().__init__()
+
         bc = branch_ch or out_ch
-        self.b0 = nn.Sequential(ConvBNReLU(in_ch,bc,1), ConvBNReLU(bc,bc,3,dilation=1,padding=1))
-        self.b1 = nn.Sequential(ConvBNReLU(in_ch,bc,1), WSPM(bc,3,wt_levels,radius_mode=radius_mode), ConvBNReLU(bc,bc,3,dilation=3,padding=3))
-        self.b2 = nn.Sequential(ConvBNReLU(in_ch,bc,1), WSPM(bc,5,wt_levels,radius_mode=radius_mode), ConvBNReLU(bc,bc,3,dilation=5,padding=5))
-        self.b3 = nn.Sequential(ConvBNReLU(in_ch,bc,1), WSPM(bc,7,wt_levels,radius_mode=radius_mode), ConvBNReLU(bc,bc,3,dilation=7,padding=7))
-        self.cat = ConvBNReLU(4*bc, out_ch, 3)
+
+        self.b0 = nn.Sequential(
+            ConvBNReLU(in_ch, bc, 1),
+            ConvBNReLU(bc, bc, 3, dilation=1, padding=1)
+        )
+
+        self.b1 = nn.Sequential(
+            ConvBNReLU(in_ch, bc, 1),
+            WSPM(bc, 3, wt_levels, radius_mode=radius_mode, wavelet=wavelet),
+            ConvBNReLU(bc, bc, 3, dilation=3, padding=3)
+        )
+
+        self.b2 = nn.Sequential(
+            ConvBNReLU(in_ch, bc, 1),
+            WSPM(bc, 5, wt_levels, radius_mode=radius_mode, wavelet=wavelet),
+            ConvBNReLU(bc, bc, 3, dilation=5, padding=5)
+        )
+
+        self.b3 = nn.Sequential(
+            ConvBNReLU(in_ch, bc, 1),
+            WSPM(bc, 7, wt_levels, radius_mode=radius_mode, wavelet=wavelet),
+            ConvBNReLU(bc, bc, 3, dilation=7, padding=7)
+        )
+
+        self.cat = ConvBNReLU(4 * bc, out_ch, 3)
         self.res = ConvBNReLU(in_ch, out_ch, 1, relu=False)
         self.act = nn.ReLU(inplace=True)
-    def forward(self, x:Tensor) -> Tensor:
+
+    def forward(self, x: Tensor) -> Tensor:
         y = torch.cat([self.b0(x), self.b1(x), self.b2(x), self.b3(x)], dim=1)
         return self.act(self.cat(y) + self.res(x))
 
@@ -383,21 +448,41 @@ class DecoderBlock(nn.Module):
         return self.conv(torch.cat([x, skip], dim=1))
 
 class FEUNet(nn.Module):
-    def __init__(self, backbone:nn.Module, encoder_channels:Sequence[int]=(144,288,576,1152),
-                 base_ch:int=64, num_classes:int=1, wt_levels:int=1, radius_mode:str='pow2',
-                 freeze_backbone:bool=False, keep_adapters_trainable:bool=True):
+    def __init__(self, backbone: nn.Module, encoder_channels: Sequence[int] = (144, 288, 576, 1152),
+                 base_ch: int = 64, num_classes: int = 1, wt_levels: int = 1,
+                 radius_mode: str = 'pow2', wavelet: str = 'haar',
+                 freeze_backbone: bool = False, keep_adapters_trainable: bool = True):
         super().__init__()
+
         if len(encoder_channels) != 4:
             raise ValueError('encoder_channels must contain 4 sizes')
+
         self.backbone = backbone
+
         if freeze_backbone:
-            for name,p in self.backbone.named_parameters():
+            for name, p in self.backbone.named_parameters():
                 p.requires_grad = bool(keep_adapters_trainable and 'adapter' in name.lower())
-        self.reducers = nn.ModuleList([FeatureReducer(int(c), base_ch) for c in encoder_channels])
-        self.ferfbs = nn.ModuleList([FERFB(base_ch, base_ch, wt_levels=wt_levels, radius_mode=radius_mode) for _ in encoder_channels])
-        self.dec3 = DecoderBlock(base_ch*2, base_ch)
-        self.dec2 = DecoderBlock(base_ch*2, base_ch)
-        self.dec1 = DecoderBlock(base_ch*2, base_ch)
+
+        self.reducers = nn.ModuleList([
+            FeatureReducer(int(c), base_ch)
+            for c in encoder_channels
+        ])
+
+        self.ferfbs = nn.ModuleList([
+            FERFB(
+                base_ch,
+                base_ch,
+                wt_levels=wt_levels,
+                radius_mode=radius_mode,
+                wavelet=wavelet
+            )
+            for _ in encoder_channels
+        ])
+
+        self.dec3 = DecoderBlock(base_ch * 2, base_ch)
+        self.dec2 = DecoderBlock(base_ch * 2, base_ch)
+        self.dec1 = DecoderBlock(base_ch * 2, base_ch)
+
         self.head3 = nn.Conv2d(base_ch, num_classes, 1)
         self.head2 = nn.Conv2d(base_ch, num_classes, 1)
         self.head1 = nn.Conv2d(base_ch, num_classes, 1)
@@ -444,20 +529,43 @@ def build_optimizer(model:nn.Module, lr:float=1e-3, weight_decay:float=1e-4) -> 
 def build_cosine_scheduler(optimizer:torch.optim.Optimizer, epochs:int=20, min_lr:float=1e-6):
     return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=min_lr)
 
-def build_feunet_sam2(model_cfg:str, ckpt_path:str, device:Union[str,torch.device]='cuda',
-                      num_classes:int=1, base_ch:int=64, insert_adapters_flag:bool=True,
-                      adapter_bottleneck_ratio:int=4, freeze_hiera:bool=True,
-                      normalize:bool=True, input_range:str='0_1', wt_levels:int=1,
-                      radius_mode:str='pow2') -> FEUNet:
+def build_feunet_sam2(
+    model_cfg: str,
+    ckpt_path: str,
+    device="cuda",
+    num_classes=1,
+    base_ch=64,
+    insert_adapters_flag=True,
+    adapter_bottleneck_ratio=4,
+    freeze_hiera=True,
+    normalize=True,
+    input_range='0_1',
+    wt_levels=1,
+    radius_mode="pow2",
+    wavelet="haar"
+):
+    print("=" * 60)
+    print("SAM2_CFG :", model_cfg)
+    print("SAM2_CKPT:", ckpt_path)
+    print("=" * 60)
     sam2 = load_official_sam2(model_cfg, ckpt_path, device=device, mode='eval', apply_postprocessing=False)
+
     backbone = SAM2HieraFeatureExtractor(
         sam2, insert_adapters_flag=insert_adapters_flag,
         adapter_bottleneck_ratio=adapter_bottleneck_ratio,
         freeze_trunk=freeze_hiera, normalize=normalize, input_range=input_range,
         expected_channels=(144,288,576,1152)
     )
-    return FEUNet(backbone, (144,288,576,1152), base_ch, num_classes,
-                  wt_levels=wt_levels, radius_mode=radius_mode, freeze_backbone=False).to(device)
+    return FEUNet(
+        backbone,
+        (144,288,576,1152),
+        base_ch,
+        num_classes,
+        wt_levels=wt_levels,
+        radius_mode=radius_mode,
+        wavelet=wavelet,
+        freeze_backbone=False
+    ).to(device)
 
 
 # -----------------------------
