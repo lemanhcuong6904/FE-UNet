@@ -25,7 +25,7 @@ import torch
 from torch import Tensor, nn
 import torch.nn.functional as F
 
-
+BACKBONE_NAME = "convnext_tiny"
 SAM2_CFG = "sam2/sam2/configs/sam2.1/sam2.1_hiera_l.yaml"
 SAM2_CKPT = "sam2/checkpoints/sam2.1_hiera_large.pt"
 PROFILE_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -39,7 +39,33 @@ LOCAL_SAM2_REPO = PROJECT_ROOT / "sam2"
 # -----------------------------
 # Basic blocks
 # -----------------------------
+def build_model(
+    backbone_name: str,
+    device="cuda",
+    num_classes=1,
+    base_ch=64,
+    pretrained=True,
+):
+    if backbone_name == "sam2":
+        model = build_feunet_sam2(
+            SAM2_CFG,
+            SAM2_CKPT,
+            device=device,
+            num_classes=num_classes,
+            base_ch=base_ch,
+        )
+        return model
 
+    model = build_feunet_timm(
+        model_name=backbone_name,
+        device=device,
+        num_classes=num_classes,
+        base_ch=base_ch,
+        pretrained=pretrained,
+        out_indices=(0, 1, 2, 3),
+    )
+
+    return model
 class ConvBNReLU(nn.Sequential):
     def __init__(self, in_ch:int, out_ch:int, kernel_size:Union[int,Tuple[int,int]]=3,
                  stride:int=1, padding:Union[int,Tuple[int,int],None]=None,
@@ -528,7 +554,68 @@ def build_optimizer(model:nn.Module, lr:float=1e-3, weight_decay:float=1e-4) -> 
 
 def build_cosine_scheduler(optimizer:torch.optim.Optimizer, epochs:int=20, min_lr:float=1e-6):
     return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=min_lr)
+class TimmBackbone(nn.Module):
+    def __init__(
+        self,
+        model_name: str,
+        pretrained: bool = True,
+        out_indices=(1, 2, 3, 4),
+        freeze: bool = False,
+    ):
+        super().__init__()
+        import timm
 
+        self.model = timm.create_model(
+            model_name,
+            pretrained=pretrained,
+            features_only=True,
+            out_indices=out_indices,
+        )
+
+        self.channels = self.model.feature_info.channels()
+
+        if freeze:
+            for p in self.model.parameters():
+                p.requires_grad = False
+
+    def forward(self, x):
+        return self.model(x)
+def build_feunet_timm(
+    model_name: str,
+    device="cuda",
+    num_classes=1,
+    base_ch=64,
+    pretrained=True,
+    freeze_backbone=False,
+    out_indices=(1, 2, 3, 4),
+    wt_levels=1,
+    radius_mode="pow2",
+    wavelet="haar",
+):
+    backbone = TimmBackbone(
+        model_name=model_name,
+        pretrained=pretrained,
+        out_indices=out_indices,
+        freeze=freeze_backbone,
+    )
+
+    encoder_channels = backbone.channels
+
+    print("Backbone:", model_name)
+    print("Encoder channels:", encoder_channels)
+
+    model = FEUNet(
+        backbone=backbone,
+        encoder_channels=encoder_channels,
+        base_ch=base_ch,
+        num_classes=num_classes,
+        wt_levels=wt_levels,
+        radius_mode=radius_mode,
+        wavelet=wavelet,
+        freeze_backbone=False,
+    )
+
+    return model.to(device)
 def build_feunet_sam2(
     model_cfg: str,
     ckpt_path: str,
@@ -544,10 +631,7 @@ def build_feunet_sam2(
     radius_mode="pow2",
     wavelet="haar"
 ):
-    print("=" * 60)
-    print("SAM2_CFG :", model_cfg)
-    print("SAM2_CKPT:", ckpt_path)
-    print("=" * 60)
+    
     sam2 = load_official_sam2(model_cfg, ckpt_path, device=device, mode='eval', apply_postprocessing=False)
 
     backbone = SAM2HieraFeatureExtractor(
@@ -600,18 +684,30 @@ def format_flops(value:int) -> str:
 
 if __name__ == '__main__':
     torch.manual_seed(0)
-    device = torch.device(PROFILE_DEVICE)
-    model = build_feunet_sam2(SAM2_CFG, SAM2_CKPT, device=device)
-    model.eval()
-    x = torch.randn(PROFILE_BATCH_SIZE, 3, PROFILE_IMAGE_SIZE, PROFILE_IMAGE_SIZE, device=device)
-    trainable, frozen, total = count_parameters(model)
-    flops, ys = measure_forward_flops(model, x)
 
-    print('Model: FE-UNet + SAM2.1 Hiera-L')
+    device = torch.device(PROFILE_DEVICE)
+
+    model = build_model(
+        backbone_name=BACKBONE_NAME,
+        device=device,
+        num_classes=1,
+        base_ch=64,
+        pretrained=True,
+    )
+
+    model.eval()
+
+    x = torch.randn(
+        PROFILE_BATCH_SIZE,
+        3,
+        PROFILE_IMAGE_SIZE,
+        PROFILE_IMAGE_SIZE,
+        device=device
+    )
+
+    with torch.no_grad():
+        ys = model(x)
+
+    print(f'Model: FE-UNet + {BACKBONE_NAME}')
     print(f'Input: {tuple(x.shape)} on {device}')
-    print(f'Trainable parameters: {format_count(trainable)} ({trainable / total:.2%})')
-    print(f'Frozen parameters:    {format_count(frozen)} ({frozen / total:.2%})')
-    print(f'Total parameters:     {format_count(total)}')
-    print(f'Forward FLOPs:        {format_count(flops)} ({format_flops(flops)})')
-    print('Note: PyTorch FLOP counting can omit unsupported operators such as FFT.')
     print('Output shapes:', [tuple(y.shape) for y in ys])
